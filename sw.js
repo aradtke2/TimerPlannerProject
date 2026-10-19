@@ -1,5 +1,5 @@
 // Bump VERSION whenever you change index.html so phones pick up the update.
-const VERSION = "tod-v3";
+const VERSION = "tod-v4";
 const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
 
 self.addEventListener("install", (e) => {

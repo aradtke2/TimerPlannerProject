@@ -108,13 +108,29 @@ nav span{display:block;font-size:20px;line-height:1.2}
 .tbl td.num{text-align:right;font-variant-numeric:tabular-nums}
 .tcount{background:var(--acc);color:var(--acc-ink);border-radius:99px;padding:1px 8px;font-size:12px;margin-left:6px;vertical-align:middle;text-transform:none;letter-spacing:0}
 .typepill{font-size:12px;color:var(--mute);margin:-8px 0 14px}
-.chk{display:flex;align-items:center;gap:8px;font-size:14px;margin:-6px 0 14px;color:var(--ink);text-transform:none;letter-spacing:0}
+.chk{display:flex;align-items:center;gap:8px;font-size:14px;margin:0 0 12px;color:var(--ink);text-transform:none;letter-spacing:0}
 .chk input{width:auto;margin:0}
 .mgr{padding:12px 0;border-top:1px solid var(--line)}
 .mgr:first-of-type{border-top:0;padding-top:0}
 .mgr b{font-size:15px}
 .mgr .small{color:var(--mute);font-size:12px;margin-bottom:6px}
 .mgr select{margin:6px 0 0;padding:9px 34px 9px 10px;font-size:14px}
+/* planner */
+.pmeta{color:var(--mute);font-size:14px;margin:-6px 0 4px}
+.step{padding:14px 16px}
+.step.done{border-color:var(--ok)}
+.srow{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.sname{min-width:0}
+.sname b{font-size:17px}
+.sname .hint{margin:2px 0 0}
+.sact button{padding:12px 18px;font-size:16px;white-space:nowrap}
+.step.active{border-color:var(--acc);border-width:2px}
+.mini{padding:6px 11px;font-size:14px;border-radius:10px}
+.edrow{display:flex;gap:6px;align-items:center}
+.pbtns{display:flex;gap:10px;margin-top:12px}
+.pbtns button{flex:1;padding:10px 0;font-size:14px}
+.pbtns button.on{background:var(--acc);color:var(--acc-ink)}
+.details{margin-top:14px;border-top:1px solid var(--line);padding-top:14px}
 </style>
 </head>
 <body>
@@ -135,18 +151,20 @@ nav span{display:block;font-size:20px;line-height:1.2}
 var KEY="time-organizer:v3", V2="time-organizer:v2", mem=null;
 
 /* ---------- data model ----------
-   types:    [{name, steps:[...]}]                  reusable process templates
-   projects: [{name, type, status, steps:[...]}]    steps here = extra steps for just this project
+   types:    [{name, steps:[...]}]       reusable templates. A new project copies the template's steps.
+   projects: [{name, type, status, plan:[...], link, result, pnotes}]
+             plan = this project's own ordered step list (it can drift from the template)
    sessions: [{id, ts, end, ms, type, project, step, done, desc, focus, notes, synced}]
-   ops:      queued structure changes waiting to be sent to the Google Sheet                    */
+   ops:      queued structure changes waiting to be sent to the Google Sheet
+   tomb:     ids of sessions deleted on this device, so a sync never brings them back              */
 function fresh(){return{
   types:[
-    {name:"YouTube video",steps:["Idea","Script","Film","Edit","Thumbnail","Publish"]},
+    {name:"YouTube video",steps:["Idea","Script","Film","Voiceover","Edit","Thumbnail","Publish"]},
     {name:"Hardware product",steps:["Concept","CAD","Prototype","Test","Documentation"]},
     {name:"Overhead",steps:["Admin","Email","Learning"]}
   ],
-  projects:[{name:"Admin & overhead",type:"Overhead",status:"active",steps:[]}],
-  sessions:[],goalH:4,theme:"auto",url:"",awake:false,exported:0,seeded:false,
+  projects:[{name:"Admin & overhead",type:"Overhead",status:"active",plan:["Admin","Email","Learning"],link:"",result:"",pnotes:""}],
+  sessions:[],goalH:4,theme:"auto",url:"",awake:false,exported:0,seeded:false,v4:false,mode:"plan",tomb:[],
   draft:{project:"",step:"",desc:""},timers:[],ops:[]
 };}
 function migrate(o){
@@ -160,6 +178,19 @@ function migrate(o){
   ["goalH","theme","awake","exported"].forEach(function(k){if(o[k]!==undefined)d[k]=o[k];});
   return d;
 }
+// Older saved data had a shared step list per type plus optional extras per project; give every project its own plan.
+function fixData(s){
+  s.projects.forEach(function(p){
+    if(!Array.isArray(p.plan)){
+      var t=s.types.filter(function(x){return x.name===p.type;})[0],base=t?t.steps.slice():[];
+      (p.steps||[]).forEach(function(x){if(base.indexOf(x)<0)base.push(x);});
+      p.plan=base;
+    }
+    delete p.steps;
+    ["link","result","pnotes"].forEach(function(k){if(typeof p[k]!=="string")p[k]="";});
+  });
+  return s;
+}
 function load(){
   var s=null;
   try{var r=localStorage.getItem(KEY);if(r)s=JSON.parse(r);}catch(e){}
@@ -168,7 +199,7 @@ function load(){
   var d=fresh();
   if(!s)return d;
   for(var k in d){if(s[k]===undefined)s[k]=d[k];}
-  return s;
+  return fixData(s);
 }
 var S=load();
 function save(){
@@ -178,8 +209,9 @@ function save(){
 function $(q){return document.querySelector(q);}
 function esc(t){return String(t==null?"":t).replace(/[&<>"']/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
 
-var tab="timer", showStop=null, statRange="7", statProj="", armed=null, wake=null, toastT=null;
-var addingP=false, addingS=false, syncing=false, syncMsg="", syncState="";
+var tab="timer", showStop=null, statRange="7", statProj="", cmpType="", armed=null, wake=null, toastT=null;
+var addingP=false, addingS=false, editPlan=false, showDetails=false, newPName="", newPType="";
+var syncing=false, syncMsg="", syncState="";
 
 /* ---------- helpers ---------- */
 function elapsed(t){return t.acc+(t.running&&t.startedAt?Date.now()-t.startedAt:0);}
@@ -207,61 +239,108 @@ async function keepAwake(on){
 }
 function softRender(){var a=document.activeElement;if(a&&/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))return;render();}
 
-/* ---------- structure helpers (types / projects / steps) ---------- */
-function findCI(list,name){var n=String(name).trim().toLowerCase();return list.filter(function(x){return String(x.name).trim().toLowerCase()===n;})[0];}
-function inListCI(list,s){var n=String(s).trim().toLowerCase();return list.some(function(x){return String(x).trim().toLowerCase()===n;});}
+/* ---------- structure helpers (types / projects / plans) ---------- */
+function lc(x){return String(x).trim().toLowerCase();}
+function findCI(list,name){var n=lc(name);return list.filter(function(x){return lc(x.name)===n;})[0];}
+function inListCI(list,s){var n=lc(s);return list.some(function(x){return lc(x)===n;});}
+function dedupe(list){var seen={},out=[];list.forEach(function(x){var k=lc(x);if(k&&!seen[k]){seen[k]=1;out.push(String(x).trim());}});return out;}
 function getType(n){return S.types.filter(function(t){return t.name===n;})[0];}
 function getProj(n){return S.projects.filter(function(p){return p.name===n;})[0];}
 function activeProjects(){return S.projects.filter(function(p){return p.status==="active";});}
-function stepsFor(pn){
-  var p=getProj(pn);if(!p)return[];
-  var t=getType(p.type),base=t?t.steps:[];
-  return base.concat(p.steps.filter(function(s){return base.indexOf(s)<0;}));
+function stepsFor(pn){var p=getProj(pn);return p?p.plan:[];}
+function stepStat(pn,step){
+  var ms=0,n=0,last=null;
+  S.sessions.forEach(function(s){if(s.project===pn&&s.step===step){ms+=s.ms;n++;if(!last||s.ts>=last.ts)last=s;}});
+  return{ms:ms,n:n,done:!!(last&&last.done)};
 }
 function enqueue(op){if(S.url){S.ops.push(op);save();}}
-function ensType(name){var t=findCI(S.types,name);if(!t){t={name:String(name).trim(),steps:[]};S.types.push(t);}return t;}
-function ensStep(t,step){if(!inListCI(t.steps,step)){t.steps.push(step);enqueue({op:"add_step",type:t.name,step:step,project:""});}}
-function ensProj(name,type){var p=findCI(S.projects,name);if(!p){p={name:String(name).trim(),type:type,status:"active",steps:[]};S.projects.push(p);enqueue({op:"add_project",name:p.name,type:type,status:"active"});}return p;}
+// Queue helpers: a newer "replace" op supersedes an older pending one for the same thing.
+function queuePlan(p){if(!S.url)return;S.ops=S.ops.filter(function(o){return!(o.op==="set_plan"&&o.project===p.name);});S.ops.push({op:"set_plan",project:p.name,type:p.type,steps:p.plan.slice()});save();}
+function queueTpl(name,steps){if(!S.url)return;S.ops=S.ops.filter(function(o){return!(o.op==="set_template"&&o.type===name);});S.ops.push({op:"set_template",type:name,steps:steps.slice()});save();}
+function queueInfo(p){if(!S.url)return;S.ops=S.ops.filter(function(o){return!(o.op==="set_info"&&o.name===p.name);});S.ops.push({op:"set_info",name:p.name,link:p.link,result:p.result,notes:p.pnotes});save();}
+function ensTypeLocal(name){var t=findCI(S.types,name);if(!t){t={name:String(name).trim(),steps:[]};S.types.push(t);}return t;}
+function ensType(name){var had=!!findCI(S.types,name),t=ensTypeLocal(name);if(!had)queueTpl(t.name,t.steps);return t;}
+function ensStep(t,step){if(!inListCI(t.steps,step)){t.steps.push(step);queueTpl(t.name,t.steps);}}
+function ensProj(name,type,plan){
+  var p=findCI(S.projects,name);
+  if(!p){
+    var t=ensTypeLocal(type);
+    p={name:String(name).trim(),type:t.name,status:"active",plan:dedupe(plan||t.steps),link:"",result:"",pnotes:""};
+    S.projects.push(p);
+    enqueue({op:"add_project",name:p.name,type:p.type,status:"active",link:"",result:"",notes:""});queuePlan(p);
+  }
+  return p;
+}
 
 /* ---------- Google Sheets sync ---------- */
 function payload(s){return{op:"session",id:s.id,timestamp:new Date(s.ts).toISOString(),type:s.type,project:s.project,step:s.step,minutes:+(s.ms/60000).toFixed(2),focus:s.focus,done:!!s.done,description:s.desc||"",notes:s.notes||""};}
 function post(obj){return fetch(S.url,{method:"POST",mode:"no-cors",body:JSON.stringify(obj)});}
 async function getRemote(){var r=await fetch(S.url+(S.url.indexOf("?")<0?"?":"&")+"t="+Date.now());return r.json();}
-function seedOps(){
-  S.types.forEach(function(t){S.ops.push({op:"add_type",name:t.name,steps:t.steps.slice()});});
-  S.projects.forEach(function(p){
-    S.ops.push({op:"add_project",name:p.name,type:p.type,status:p.status});
-    p.steps.forEach(function(st){S.ops.push({op:"add_step",type:p.type,step:st,project:p.name});});
-  });
+async function sendOps(){while(S.ops.length){await post(S.ops[0]);S.ops.shift();save();}}
+function markSynced(j){
+  var have={},ok=0;(j.logIds||[]).forEach(function(x){have[String(x)]=1;});
+  S.sessions.forEach(function(s){if(!s.synced&&have[String(s.id)]){s.synced=true;ok++;}});
+  return ok;
 }
+// Pull the sheet's structure and sessions into this device. The sheet wins for anything it already has.
 function mergeRemote(j){
-  (j.projects||[]).forEach(function(r){
-    if(!r.name||!r.type)return;
-    ensTypeLocal(r.type);
-    var p=findCI(S.projects,r.name),st=/^(active|paused|done)$/.test(r.status)?r.status:"active";
-    if(!p)S.projects.push({name:r.name,type:r.type,status:st,steps:[]});
-    else p.status=st;
-  });
+  var tpl={},plans={},legacy={};
   (j.steps||[]).forEach(function(r){
     if(!r.type||!r.step)return;
-    var ty=ensTypeLocal(r.type);
-    if(!r.project){if(!inListCI(ty.steps,r.step))ty.steps.push(r.step);}
-    else{var p=findCI(S.projects,r.project);if(p&&!inListCI(stepsFor(p.name),r.step))p.steps.push(r.step);}
+    if(!r.project){(tpl[lc(r.type)]=tpl[lc(r.type)]||{type:r.type,list:[]}).list.push(r.step);}
+    else if(r.kind==="plan"){(plans[lc(r.project)]=plans[lc(r.project)]||[]).push(r.step);}
+    else{(legacy[lc(r.project)]=legacy[lc(r.project)]||[]).push(r.step);}
+  });
+  Object.keys(tpl).forEach(function(k){ensTypeLocal(tpl[k].type).steps=dedupe(tpl[k].list);});
+  (j.projects||[]).forEach(function(r){
+    if(!r.name||!r.type)return;
+    var ty=ensTypeLocal(r.type),st=/^(active|paused|done)$/.test(r.status)?r.status:"active",k=lc(r.name);
+    var p=findCI(S.projects,r.name);
+    if(!p){p={name:String(r.name).trim(),type:ty.name,status:st,plan:dedupe(plans[k]||ty.steps.concat(legacy[k]||[])),link:"",result:"",pnotes:""};S.projects.push(p);}
+    else{p.status=st;if(plans[k])p.plan=dedupe(plans[k]);}
+    if(r.link!==undefined)p.link=String(r.link||"");
+    if(r.result!==undefined)p.result=String(r.result||"");
+    if(r.notes!==undefined)p.pnotes=String(r.notes||"");
+  });
+  // sessions
+  var rem={},loc={};
+  (j.sessions||[]).forEach(function(r){rem[String(r.id)]=1;});
+  if(j.complete)S.sessions=S.sessions.filter(function(s){return!s.synced||rem[String(s.id)];}); // deleted in the sheet
+  S.sessions.forEach(function(s){loc[String(s.id)]=1;});
+  (j.sessions||[]).forEach(function(r){
+    var id=Number(r.id),ts=Number(r.ts),min=Number(r.minutes);
+    if(!id||!ts||!(min>=0)||loc[String(id)]||S.tomb.indexOf(id)>=0)return;
+    var ms=Math.round(min*60000);
+    S.sessions.push({id:id,ts:ts,end:ts+ms,ms:ms,type:String(r.type||"General"),project:String(r.project||"Unknown"),step:String(r.step||"Other"),done:!!r.done,desc:String(r.description||""),focus:Math.min(5,Math.max(1,Number(r.focus)||3)),notes:String(r.notes||""),synced:true});
+    loc[String(id)]=1;
   });
 }
-function ensTypeLocal(name){var t=findCI(S.types,name);if(!t){t={name:String(name).trim(),steps:[]};S.types.push(t);}return t;}
+// One time per device: send whatever the sheet doesn't have yet (never overwrites what it has).
+function seedMissing(j){
+  var hasTpl={},hasPlan={},hasProj={},n=0;
+  (j.steps||[]).forEach(function(r){if(!r.project)hasTpl[lc(r.type)]=1;else if(r.kind==="plan")hasPlan[lc(r.project)]=1;});
+  (j.projects||[]).forEach(function(r){hasProj[lc(r.name)]=1;});
+  S.types.forEach(function(t){if(t.steps.length&&!hasTpl[lc(t.name)]){S.ops.push({op:"set_template",type:t.name,steps:t.steps.slice()});n++;}});
+  S.projects.forEach(function(p){
+    if(!hasProj[lc(p.name)]){S.ops.push({op:"add_project",name:p.name,type:p.type,status:p.status,link:p.link,result:p.result,notes:p.pnotes});n++;}
+    if(!hasPlan[lc(p.name)]){S.ops.push({op:"set_plan",project:p.name,type:p.type,steps:p.plan.slice()});n++;}
+  });
+  return n;
+}
 async function flush(){
   if(!S.url||syncing||!navigator.onLine)return;
   syncing=true;
   try{
-    if(!S.seeded){seedOps();S.seeded=true;save();}
-    while(S.ops.length){await post(S.ops[0]);S.ops.shift();save();}
+    await sendOps();
     var q=S.sessions.filter(function(s){return!s.synced;});
     for(var i=0;i<q.length;i++)await post(payload(q[i]));
-    var j=await getRemote(),have={},ok=0;
-    (j.logIds||[]).forEach(function(x){have[String(x)]=1;});
-    S.sessions.forEach(function(s){if(!s.synced&&have[String(s.id)]){s.synced=true;ok++;}});
-    mergeRemote(j);save();
+    var j=await getRemote(),ok=markSynced(j);
+    mergeRemote(j);
+    if(!S.v4){
+      var cnt=seedMissing(j);S.v4=true;S.seeded=true;save();
+      if(cnt){await sendOps();j=await getRemote();ok+=markSynced(j);mergeRemote(j);}
+    }
+    save();
     var left=pending();
     syncMsg=left?"Sent, but "+left+" session"+(left===1?"":"s")+" not confirmed by the sheet yet":"Synced"+(ok?" · "+ok+" uploaded":"");
     syncState=left?"bad":"good";
@@ -277,7 +356,7 @@ function timerCard(t){
       +'<div class="sub" style="text-align:left;margin-bottom:16px">'+esc(t.type)+' · '+dur(t.acc)+' logged</div>'
       +'<label>Description</label><input data-tid="'+id+'" data-f="desc" value="'+esc(t.desc)+'" placeholder="Short summary (optional)" maxlength="200">'
       +'<label>Is this step finished?</label><div class="seg"><button data-a="done" data-id="'+id+'" data-v="0" class="'+(!t.done?"on":"")+'">Not yet</button><button data-a="done" data-id="'+id+'" data-v="1" class="'+(t.done?"on":"")+'">Finished ✓</button></div>'
-      +'<label>Focus</label><div class="focus">'
+      +'<label>Focus this session</label><div class="focus">'
       +[1,2,3,4,5].map(function(n){return'<button data-a="focus" data-id="'+id+'" data-v="'+n+'" class="'+(t.focus===n?"on":"")+'">'+n+'</button>';}).join("")
       +'</div><label>Notes</label><textarea data-tid="'+id+'" data-f="notes" placeholder="Details, blockers, next steps…">'+esc(t.notes)+'</textarea>'
       +'<div class="row"><button class="ok big" data-a="commit" data-id="'+id+'">Save</button><button class="dng big" data-a="discard" data-id="'+id+'">Discard</button></div></div>';
@@ -290,36 +369,93 @@ function timerCard(t){
     +(t.running?'<button class="big" data-a="pause" data-id="'+id+'">⏸ Pause</button>':'<button class="pri big" data-a="resume" data-id="'+id+'">▶ Resume</button>')
     +'<button class="big dng" data-a="stop" data-id="'+id+'">■ Stop</button></div></div>';
 }
+
+function newProjectCard(canCancel){
+  if(!S.types.length)return'<div class="card"><div class="hint" style="margin:0">Add a project type with its steps in Settings first.</div></div>';
+  if(!getType(newPType))newPType=S.types[0].name;
+  var ty=getType(newPType);
+  return'<div class="card"><label>New project</label><input id="newPN" placeholder="Project name" autocapitalize="words" value="'+esc(newPName)+'">'
+    +'<label>Type of project</label><select id="newPT">'+opts(S.types.map(function(t){return t.name;}),newPType)+'</select>'
+    +'<label>Steps to plan (untick any you don’t need)</label>'
+    +(ty.steps.length?ty.steps.map(function(s,i){return'<label class="chk"><input type="checkbox" data-pstep="'+i+'" checked> '+esc(s)+'</label>';}).join(""):'<div class="hint" style="margin:0 0 12px">This type has no steps yet. You can add steps to the project after creating it.</div>')
+    +'<div class="row" style="margin-top:6px"><button class="pri big" data-a="addP" style="font-size:16px;padding:14px">Create project</button>'+(canCancel?'<button class="big" data-a="cancelAdd" style="font-size:16px;padding:14px">Cancel</button>':'')+'</div></div>';
+}
+
+function planView(p){
+  var stats=p.plan.map(function(s){return stepStat(p.name,s);});
+  var total=0,doneN=0;stats.forEach(function(x){total+=x.ms;if(x.done)doneN++;});
+  var pc=p.plan.length?doneN/p.plan.length*100:0;
+  var ap=activeProjects();
+  var h='<div class="card"><label>Project</label><div class="add"><select id="selP">'+popts(ap,p.name)+'</select><button data-a="newP" aria-label="New project">＋</button></div>'
+    +'<div class="pmeta">'+esc(p.type)+' · '+doneN+' of '+p.plan.length+' steps finished · '+dur(total)+' logged</div>'
+    +'<div class="goal"><i style="width:'+pc+'%"></i></div>'
+    +'<div class="pbtns"><button data-a="toggleEdit" class="'+(editPlan?"on":"")+'">'+(editPlan?"Done editing":"Edit plan")+'</button><button data-a="toggleDetails" class="'+(showDetails?"on":"")+'">Details</button></div>';
+  if(showDetails){
+    h+='<div class="details"><label>Link</label><input data-pinfo="link" value="'+esc(p.link)+'" placeholder="https://… (video, listing, folder)" maxlength="300" inputmode="url" autocapitalize="off">'
+      +'<label>Result</label><input data-pinfo="result" value="'+esc(p.result)+'" placeholder="e.g. 10 min video, published Oct 20" maxlength="200">'
+      +'<label>Project notes</label><textarea data-pinfo="pnotes" placeholder="What worked, what to do differently…" style="min-height:80px">'+esc(p.pnotes)+'</textarea>'
+      +'<label>Status</label><select data-pstat style="margin-bottom:0">'+["active","paused","done"].map(function(x){return'<option'+(x===p.status?" selected":"")+'>'+x+'</option>';}).join("")+'</select></div>';
+  }
+  h+='</div>';
+  if(!p.plan.length&&!editPlan)h+='<div class="card"><div class="hint" style="margin:0">This project has no steps yet. Tap <b>Edit plan</b> to add some.</div></div>';
+  p.plan.forEach(function(step,i){
+    var st=stats[i];
+    var tm=S.timers.filter(function(t){return t.project===p.name&&t.step===step&&t.phase!=="save";})[0];
+    if(editPlan){
+      h+='<div class="card step"><div class="srow"><div class="sname"><b>'+esc(step)+'</b></div><div class="edrow">'
+        +'<button class="mini" data-a="mvup" data-s="'+i+'" aria-label="Move up"'+(i===0?' disabled':'')+'>↑</button>'
+        +'<button class="mini" data-a="mvdn" data-s="'+i+'" aria-label="Move down"'+(i===p.plan.length-1?' disabled':'')+'>↓</button>'
+        +'<button class="mini dng" data-a="rmplan" data-s="'+i+'" aria-label="Remove">✕</button></div></div></div>';
+    }else if(tm){
+      h+='<div class="card step active"><div class="srow"><div class="sname"><b>'+esc(step)+'</b> <span class="pill '+(tm.running?"run":"pause")+'">'+(tm.running?"Running":"Paused")+'</span>'
+        +'<div class="hint">'+(st.n?dur(st.ms)+' logged before this · ':'')+'tap Stop to finish the session</div></div></div>'
+        +'<div class="clock sm clk" data-id="'+tm.id+'">'+clock(elapsed(tm))+'</div>'
+        +'<input data-tid="'+tm.id+'" data-f="desc" placeholder="Add a description…" value="'+esc(tm.desc)+'" maxlength="200" style="margin-top:6px">'
+        +'<div class="row">'+(tm.running?'<button class="big" data-a="pause" data-id="'+tm.id+'" style="font-size:16px;padding:14px">⏸ Pause</button>':'<button class="pri big" data-a="resume" data-id="'+tm.id+'" style="font-size:16px;padding:14px">▶ Resume</button>')
+        +'<button class="big dng" data-a="stop" data-id="'+tm.id+'" style="font-size:16px;padding:14px">■ Stop</button></div></div>';
+    }else{
+      h+='<div class="card step'+(st.done?" done":"")+'"><div class="srow"><div class="sname"><b>'+esc(step)+'</b>'+(st.done?' <span style="color:var(--ok)">✓</span>':'')
+        +'<div class="hint">'+(st.n?dur(st.ms)+' · '+st.n+' session'+(st.n===1?"":"s"):'Not started')+'</div></div>'
+        +'<div class="sact"><button class="pri" data-a="go" data-s="'+i+'">▶ Go</button></div></div></div>';
+    }
+  });
+  if(editPlan){
+    h+='<div class="card"><label>Add a step to this project</label><div class="add"><input id="newSN" placeholder="e.g. Color grade" autocapitalize="words"><button class="pri" data-a="addS">Add</button></div>'
+      +'<label class="chk"><input type="checkbox" id="newSO" checked> Also add it to the “'+esc(p.type)+'” template for future projects</label>'
+      +'<div class="hint">Changes to a template never change projects that already exist.</div></div>';
+  }
+  return h;
+}
+
+function quickView(cur){
+  var d=S.draft,ap=activeProjects(),steps=cur.plan;
+  if(steps.indexOf(d.step)<0)d.step=steps[0]||"";
+  var h='<div class="card"><label>Project</label><div class="add"><select id="selP">'+popts(ap,d.project)+'</select><button data-a="newP" aria-label="New project">＋</button></div>'
+    +'<div class="typepill">Type: '+esc(cur.type)+'</div><label>Step</label>';
+  if(addingS||!steps.length){
+    h+='<div class="add"><input id="newSN" placeholder="New step name" autocapitalize="words"><button class="pri" data-a="addS">Add</button>'+(steps.length?'<button data-a="cancelAdd">✕</button>':'')+'</div>'
+      +'<label class="chk"><input type="checkbox" id="newSO" checked> Also add it to the “'+esc(cur.type)+'” template</label>';
+  }else{
+    h+='<div class="add"><select id="selS">'+opts(steps,d.step)+'</select><button data-a="newS" aria-label="New step">＋</button></div>';
+  }
+  h+='<label>Description</label><input id="desc" placeholder="What are you working on? (optional)" value="'+esc(d.desc)+'" maxlength="200">'
+    +'<button class="pri big" data-a="start">▶ Start</button></div>';
+  return h;
+}
+
 function viewTimer(){
-  var d=S.draft,n=S.timers.length,ap=activeProjects();
-  var h='<h1><span>Time Organizer'+(n?'<span class="tcount">'+n+' active</span>':'')+'</span>'+(S.url&&(pending()||S.ops.length)?'<span class="cloud">☁︎ '+pending()+' to upload</span>':'')+'</h1>';
-  S.timers.forEach(function(t){h+=timerCard(t);});
+  var d=S.draft,n=S.timers.length,ap=activeProjects(),plan=S.mode==="plan";
+  var h='<h1><span>Time Organizer'+(n?'<span class="tcount">'+n+' active</span>':'')+'</span>'+(S.url&&(pending()||S.ops.length)?'<span class="cloud">☁︎ '+pending()+' to upload</span>':'')+'</h1>'
+    +'<div class="seg"><button data-a="mode" data-v="plan" class="'+(plan?"on":"")+'">Plan</button><button data-a="mode" data-v="quick" class="'+(!plan?"on":"")+'">Quick timer</button></div>';
   var cur=getProj(d.project);
   if(!cur||cur.status!=="active"){d.project=ap[0]?ap[0].name:"";cur=getProj(d.project);}
-  var steps=stepsFor(d.project);
-  if(steps.indexOf(d.step)<0)d.step=steps[0]||"";
-  h+='<div class="card">'+(n?'<label style="color:var(--ink);font-weight:700">Start another</label>':'')+'<label>Project</label>';
-  if(addingP||!ap.length){
-    h+=S.types.length
-      ?'<div class="add"><input id="newPN" placeholder="New project name" autocapitalize="words"></div>'
-       +'<label>Type of project</label><div class="add"><select id="newPT">'+opts(S.types.map(function(t){return t.name;}),cur?cur.type:"")+'</select><button class="pri" data-a="addP">Add</button>'+(ap.length?'<button data-a="cancelAdd">✕</button>':'')+'</div>'
-      :'<div class="hint" style="margin:0 0 14px">Add a project type with its steps in Settings first.</div>';
-  }else{
-    h+='<div class="add"><select id="selP">'+popts(ap,d.project)+'</select><button data-a="newP" aria-label="New project">＋</button></div>'
-      +'<div class="typepill">Type: '+esc(cur.type)+'</div>';
-  }
-  if(cur&&!(addingP||!ap.length)){
-    h+='<label>Step</label>';
-    if(addingS||!steps.length){
-      h+='<div class="add"><input id="newSN" placeholder="New step name" autocapitalize="words"><button class="pri" data-a="addS">Add</button>'+(steps.length?'<button data-a="cancelAdd">✕</button>':'')+'</div>'
-        +'<label class="chk"><input type="checkbox" id="newSO"> Only for this project (otherwise every “'+esc(cur.type)+'” project)</label>';
-    }else{
-      h+='<div class="add"><select id="selS">'+opts(steps,d.step)+'</select><button data-a="newS" aria-label="New step">＋</button></div>';
-    }
-    h+='<label>Description</label><input id="desc" placeholder="What are you working on? (optional)" value="'+esc(d.desc)+'" maxlength="200">'
-      +'<button class="pri big" data-a="start">▶ Start'+(n?' another':'')+'</button>';
-  }
-  h+='</div><div class="sub">Today so far: <b>'+dur(todayMs())+'</b>'+(S.goalH?' of '+S.goalH+'h goal':'')+'</div>'
+  var showNew=addingP||!ap.length;
+  S.timers.forEach(function(t){
+    if(t.phase==="save"||!(plan&&cur&&!showNew&&t.project===cur.name))h+=timerCard(t);
+  });
+  if(showNew)h+=newProjectCard(ap.length>0);
+  else h+=plan?planView(cur):quickView(cur);
+  h+='<div class="sub">Today so far: <b>'+dur(todayMs())+'</b>'+(S.goalH?' of '+S.goalH+'h goal':'')+'</div>'
     +(anyRunning()?'<div class="hint" style="text-align:center">You can lock the screen — time keeps counting.</div>':'');
   return h;
 }
@@ -384,19 +520,33 @@ function viewStats(){
   }
   if(!rows.length)h+='<div class="empty">Nothing logged in this range.</div>';
   else h+=group("project","By project")+group("type","By type")+group("step","By step");
-  // per-project step breakdown (all time): where did the time go, which steps are finished
+  // per-project step breakdown (all time)
   var names=[];S.sessions.forEach(function(s){if(names.indexOf(s.project)<0)names.push(s.project);});
   if(names.length){
     if(names.indexOf(statProj)<0)statProj=names[0];
     var ps=S.sessions.filter(function(s){return s.project===statProj;});
-    var steps=stepsFor(statProj);
+    var steps=stepsFor(statProj).slice();
     ps.forEach(function(s){if(steps.indexOf(s.step)<0)steps.push(s.step);});
     var agg={};steps.forEach(function(s){agg[s]={ms:0,done:false};});
-    ps.forEach(function(s){agg[s.step].ms+=s.ms;if(s.done)agg[s.step].done=true;});
+    steps.forEach(function(s){var q=stepStat(statProj,s);agg[s]={ms:q.ms,done:q.done};});
     var top2=Math.max.apply(null,steps.map(function(s){return agg[s].ms;}).concat([1]));
     h+='<div class="card"><label>Project breakdown (all time)</label><select id="statProj">'+opts(names,statProj)+'</select>'
       +steps.map(function(s){var a=agg[s];return'<div class="bar'+(a.ms||a.done?'':' zero')+'"><span class="n">'+esc(s)+(a.done?' ✓':'')+'</span><span class="t"><i style="width:'+(a.ms/top2*100)+'%"></i></span><span class="v">'+(a.ms?dur(a.ms):'–')+'</span></div>';}).join("")
       +'<div class="sub" style="text-align:left;margin-top:8px">Total '+dur(ps.reduce(function(a,s){return a+s.ms;},0))+'</div></div>';
+  }
+  // compare projects of the same type
+  var tnames=[];S.projects.forEach(function(p){if(tnames.indexOf(p.type)<0&&S.sessions.some(function(s){return s.project===p.name;}))tnames.push(p.type);});
+  if(tnames.length){
+    if(tnames.indexOf(cmpType)<0)cmpType=tnames[0];
+    var plist=S.projects.filter(function(p){return p.type===cmpType&&S.sessions.some(function(s){return s.project===p.name;});}).map(function(p){
+      var ss=S.sessions.filter(function(s){return s.project===p.name;});
+      var ms=ss.reduce(function(a,s){return a+s.ms;},0),f=ss.reduce(function(a,s){return a+s.focus;},0)/ss.length;
+      var dn=p.plan.filter(function(st){return stepStat(p.name,st).done;}).length;
+      return{p:p,ms:ms,n:ss.length,f:f,dn:dn};
+    }).sort(function(a,b){return b.ms-a.ms;});
+    h+='<div class="card"><label>Compare projects of one type</label><select id="cmpType">'+opts(tnames,cmpType)+'</select>'
+      +plist.map(function(x){return'<div class="mgr"><b>'+esc(x.p.name)+'</b> <span class="hint">'+dur(x.ms)+' · '+x.n+' session'+(x.n===1?"":"s")+' · focus '+x.f.toFixed(1)+' · '+x.dn+'/'+x.p.plan.length+' steps done'+(x.p.status!=="active"?' · '+x.p.status:'')+'</span>'
+        +(x.p.result?'<div class="small" style="margin:4px 0 0">'+esc(x.p.result)+'</div>':'')+'</div>';}).join("")+'</div>';
   }
   return h;
 }
@@ -407,31 +557,31 @@ function viewSettings(){
    +'<div class="card"><label>Google Sheets sync</label>'
    +'<input id="url" type="url" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Paste your Apps Script web app URL" value="'+esc(S.url)+'" style="margin-bottom:10px">'
    +'<button class="pri big" data-a="sync" style="font-size:16px;padding:14px">Sync now</button>'
-   +'<p class="hint sync '+syncState+'">'+(S.url?(syncMsg||(pending()?pending()+" session"+(pending()===1?"":"s")+" waiting to upload":"All sessions uploaded")):"Not connected — sessions are stored on this phone only.")+'</p></div>'
+   +'<p class="hint sync '+syncState+'">'+(S.url?(syncMsg||(pending()?pending()+" session"+(pending()===1?"":"s")+" waiting to upload":"All sessions uploaded")):"Not connected — sessions are stored on this device only.")+'</p></div>'
    +'<div class="card"><label>Projects</label>';
   if(!S.projects.length)h+='<div class="hint">No projects yet. Add one from the Timer tab.</div>';
   S.projects.forEach(function(p,i){
-    h+='<div class="mgr"><b>'+esc(p.name)+'</b><div class="small">'+esc(p.type)+(p.steps.length?' · extra steps: '+esc(p.steps.join(", ")):'')+'</div>'+statusSel(i,p.status)+'</div>';
+    h+='<div class="mgr"><b>'+esc(p.name)+'</b><div class="small">'+esc(p.type)+' · '+p.plan.length+' steps</div>'+statusSel(i,p.status)+'</div>';
   });
-  h+='<p class="hint">Only “active” projects show in the Timer. Mark finished videos “done” to keep the list short.</p></div>'
-   +'<div class="card"><label>Types and their steps</label>';
+  h+='<p class="hint">Only “active” projects show in the Timer. Edit a project’s steps from the Timer tab (Plan > Edit plan).</p></div>'
+   +'<div class="card"><label>Templates: types and their default steps</label>';
   S.types.forEach(function(t,ti){
     h+='<div class="mgr"><b>'+esc(t.name)+'</b>'
       +'<div style="margin:8px 0">'+t.steps.map(function(s,si){return'<span class="tag">'+esc(s)+'<button data-a="rmstep" data-t="'+ti+'" data-v="'+si+'" aria-label="Remove">×</button></span>';}).join("")+'</div>'
-      +'<div class="add"><input id="ns'+ti+'" placeholder="Add a step to every '+esc(t.name)+' project"><button class="pri" data-a="addTstep" data-t="'+ti+'">Add</button></div>'
+      +'<div class="add"><input id="ns'+ti+'" placeholder="Add a default step to every new '+esc(t.name)+'"><button class="pri" data-a="addTstep" data-t="'+ti+'">Add</button></div>'
       +'<button class="dng" style="padding:6px 12px;font-size:13px" data-a="rmtype" data-t="'+ti+'">'+(armed==="t"+ti?"Tap again to remove type":"Remove type")+'</button></div>';
   });
   h+='<div class="mgr"><label>New type</label><input id="newTN" placeholder="Type name, e.g. Podcast episode" autocapitalize="words">'
    +'<input id="newTS" placeholder="Steps, separated by commas">'
    +'<button class="pri" data-a="addtype" style="width:100%">Add type</button></div>'
-   +'<p class="hint">Removing a type, step or project here does not remove it from the Google Sheet — delete its row there too, or it comes back at the next sync. Renaming isn’t supported yet.</p></div>'
+   +'<p class="hint">A template only supplies the starting steps for new projects. Existing projects keep their own plan. Renaming isn’t supported yet.</p></div>'
    +'<div class="card"><label>Daily goal (hours, 0 = off)</label><input id="goal" type="number" min="0" max="24" step="0.5" inputmode="decimal" value="'+S.goalH+'" style="margin-bottom:10px">'
-   +'<label>Theme</label><select id="theme"><option value="auto"'+(S.theme==="auto"?" selected":"")+'>Match phone</option><option value="light"'+(S.theme==="light"?" selected":"")+'>Light</option><option value="dark"'+(S.theme==="dark"?" selected":"")+'>Dark</option></select>'
+   +'<label>Theme</label><select id="theme"><option value="auto"'+(S.theme==="auto"?" selected":"")+'>Match device</option><option value="light"'+(S.theme==="light"?" selected":"")+'>Light</option><option value="dark"'+(S.theme==="dark"?" selected":"")+'>Dark</option></select>'
    +'<label>Keep screen on while timing</label><select id="awake" style="margin-bottom:0"><option value="0"'+(!S.awake?" selected":"")+'>Off (screen can lock)</option><option value="1"'+(S.awake?" selected":"")+'>On</option></select></div>'
    +'<div class="card"><label>Backup</label><div class="row"><button data-a="json">Save backup</button><button data-a="copyjson">Copy backup</button></div>'
    +'<p class="hint">Includes sessions, types and projects.</p></div>'
-   +'<div class="card"><label>Restore backup (paste)</label><textarea id="restore" placeholder="Paste a backup here — new or from the older version" style="min-height:70px"></textarea><button data-a="restore" class="big">Merge into app</button></div>'
-   +'<div class="card"><button class="dng big" data-a="wipe">'+(armed==="wipe"?"Tap again to erase all sessions":"Erase all sessions")+'</button></div>';
+   +'<div class="card"><label>Restore backup (paste)</label><textarea id="restore" placeholder="Paste a backup here — new or from an older version" style="min-height:70px"></textarea><button data-a="restore" class="big">Merge into app</button></div>'
+   +'<div class="card"><button class="dng big" data-a="wipe">'+(armed==="wipe"?"Tap again to clear sessions here":"Clear sessions from this device")+'</button><p class="hint">Only clears this device. The Google Sheet keeps its rows; delete rows there yourself if you want them gone.</p></div>';
   return h;
 }
 
@@ -450,7 +600,7 @@ function flat(v){return String(v||"").replace(/[\t\r\n]+/g," ");}
 function tsvOf(list){return list.map(function(s){return[stamp(s.ts),s.type,s.project,s.step,(s.ms/60000).toFixed(1),s.focus,s.done?"Yes":"No",flat(s.desc),flat(s.notes)].join("\t");}).join("\n");}
 function tsv(){return tsvOf(rowsSorted());}
 function csv(){return"Date,Type,Project,Step,Minutes,Focus,Step done,Description,Notes\n"+rowsSorted().map(function(s){return[stamp(s.ts),s.type,s.project,s.step,(s.ms/60000).toFixed(1),s.focus,s.done?"Yes":"No",s.desc||"",s.notes||""].map(cell).join(",");}).join("\n");}
-function backup(){return{v:3,types:S.types,projects:S.projects,sessions:S.sessions};}
+function backup(){return{v:4,types:S.types,projects:S.projects,sessions:S.sessions};}
 async function saveFile(name,data,type){
   try{
     var dl=window.claude&&claude.use?await claude.use("downloads"):null;
@@ -474,8 +624,13 @@ function restoreData(data){
   if(data&&!Array.isArray(data)){
     (data.types||[]).forEach(function(t){if(t&&t.name){var ty=ensType(t.name);(t.steps||[]).forEach(function(s){ensStep(ty,String(s));});}});
     (data.projects||[]).forEach(function(p){
-      if(p&&p.name&&p.type){ensType(p.type);var np=ensProj(p.name,p.type);if(/^(paused|done)$/.test(p.status)&&np.status==="active"){np.status=p.status;enqueue({op:"set_status",name:np.name,status:np.status});}
-        (p.steps||[]).forEach(function(s){if(!inListCI(stepsFor(np.name),s)){np.steps.push(String(s));enqueue({op:"add_step",type:np.type,step:String(s),project:np.name});}});}
+      if(!(p&&p.name&&p.type))return;
+      var ty=ensType(p.type),base=Array.isArray(p.plan)?p.plan.slice():ty.steps.slice();
+      (p.steps||[]).forEach(function(x){if(!inListCI(base,x))base.push(String(x));});
+      var np=ensProj(p.name,ty.name,base);
+      if(/^(paused|done)$/.test(p.status)&&np.status==="active"){np.status=p.status;enqueue({op:"set_status",name:np.name,status:np.status});}
+      var ch=false;["link","result","pnotes"].forEach(function(k){if(p[k]&&!np[k]){np[k]=String(p[k]);ch=true;}});
+      if(ch)queueInfo(np);
     });
   }
   var have={},added=0;S.sessions.forEach(function(s){have[s.id]=1;});
@@ -483,14 +638,21 @@ function restoreData(data){
     if(!s||!s.id||!(s.ms>=0)||have[s.id])return;
     var tn=String(s.type||"General"),pn=String(s.project||"Unknown"),st=String(s.step||s.action||"Other");
     var ty=ensType(tn);ensStep(ty,st);
-    var ex=findCI(S.projects,pn);ensProj(pn,ex?ex.type:ty.name);
-    S.sessions.push({id:s.id,ts:s.ts,end:s.end||s.ts,ms:s.ms,type:ty.name,project:(ex?ex.name:pn),step:st,done:!!s.done,desc:String(s.desc||""),focus:Math.min(5,Math.max(1,s.focus|0||3)),notes:String(s.notes||""),synced:false});
+    var p=findCI(S.projects,pn)||ensProj(pn,ty.name,ty.steps);
+    if(!inListCI(p.plan,st)){p.plan.push(st);queuePlan(p);}
+    S.sessions.push({id:s.id,ts:s.ts,end:s.end||s.ts,ms:s.ms,type:p.type,project:p.name,step:st,done:!!s.done,desc:String(s.desc||""),focus:Math.min(5,Math.max(1,s.focus|0||3)),notes:String(s.notes||""),synced:false});
+    S.tomb=S.tomb.filter(function(x){return x!==s.id;});
     have[s.id]=1;added++;
   });
   return added;
 }
 
 /* ---------- actions ---------- */
+function startTimer(p,step){
+  var id=Date.now();while(T(id))id++;
+  S.timers.push({id:id,project:p.name,type:p.type,step:step,desc:"",running:true,startedAt:Date.now(),acc:0,first:Date.now(),phase:"run",focus:3,done:false,notes:""});
+  save();keepAwake(true);
+}
 document.addEventListener("click",function(e){
   var el=e.target.closest("[data-a]");if(!el)return;
   if(el.dataset.bg&&e.target!==el)return;
@@ -498,14 +660,18 @@ document.addEventListener("click",function(e){
   if(a!=="del"&&a!=="wipe"&&a!=="rmtype")armed=null;
   switch(a){
     case"tab":tab=v;render();return;
+    case"mode":S.mode=v;addingP=false;addingS=false;save();break;
+    case"go":
+      var gp=getProj(d.project),gs=gp&&gp.plan[+el.dataset.s];
+      if(!gs)break;
+      startTimer(gp,gs);break;
     case"start":
       var sp=$("#selP"),ss=$("#selS"),dd0=$("#desc");
       if(sp)d.project=sp.value;if(ss)d.step=ss.value;if(dd0)d.desc=dd0.value;
       var pj=getProj(d.project);
       if(!pj||!d.step){toast("Pick a project and a step first");return;}
-      var nid=Date.now();while(T(nid))nid++;
-      S.timers.push({id:nid,project:pj.name,type:pj.type,step:d.step,desc:(d.desc||"").trim(),running:true,startedAt:Date.now(),acc:0,first:Date.now(),phase:"run",focus:3,done:false,notes:""});
-      d.desc="";save();keepAwake(true);break;
+      startTimer(pj,d.step);
+      S.timers[S.timers.length-1].desc=(d.desc||"").trim();d.desc="";save();break;
     case"pause":if(t&&t.running){t.acc+=Date.now()-t.startedAt;t.running=false;t.startedAt=null;}save();if(!anyRunning())keepAwake(false);break;
     case"resume":if(t&&!t.running){t.running=true;t.startedAt=Date.now();}save();keepAwake(true);break;
     case"stop":
@@ -525,41 +691,64 @@ document.addEventListener("click",function(e){
       save();toast("Session saved · "+dur(t.acc));flush();break;
     case"discard":S.timers=S.timers.filter(function(x){return x!==t;});save();break;
     case"del":
-      if(armed==="s"+v){S.sessions=S.sessions.filter(function(s){return String(s.id)!==v;});armed=null;save();}else armed="s"+v;break;
+      if(armed==="s"+v){
+        var did=Number(v);S.sessions=S.sessions.filter(function(s){return String(s.id)!==v;});
+        S.tomb.push(did);enqueue({op:"delete_session",id:did});armed=null;save();
+      }else armed="s"+v;
+      break;
     case"range":statRange=v;break;
-    case"newP":addingP=true;break;
+    case"newP":addingP=true;newPName="";break;
     case"newS":addingS=true;break;
     case"cancelAdd":addingP=false;addingS=false;break;
+    case"toggleEdit":editPlan=!editPlan;break;
+    case"toggleDetails":showDetails=!showDetails;break;
     case"addP":
-      var pn=($("#newPN").value||"").trim(),ptn=$("#newPT")?$("#newPT").value:"";
+      var pn=($("#newPN").value||"").trim(),pty=getType($("#newPT")?$("#newPT").value:"");
       if(!pn){toast("Type a project name first");return;}
-      if(!getType(ptn)){toast("Choose a type first");return;}
+      if(!pty){toast("Choose a type first");return;}
+      var picked=[];
+      document.querySelectorAll("input[data-pstep]").forEach(function(c){if(c.checked)picked.push(pty.steps[+c.dataset.pstep]);});
       var exp=findCI(S.projects,pn);
-      if(exp){if(exp.status!=="active"){exp.status="active";enqueue({op:"set_status",name:exp.name,status:"active"});}d.project=exp.name;}
-      else{ensProj(pn,ptn);d.project=pn;}
-      d.step="";addingP=false;save();break;
+      if(exp){if(exp.status!=="active"){exp.status="active";enqueue({op:"set_status",name:exp.name,status:"active"});}d.project=exp.name;toast("That project already exists — opened it");}
+      else{d.project=ensProj(pn,pty.name,picked).name;}
+      d.step="";addingP=false;newPName="";save();break;
+    case"mvup":case"mvdn":
+      var mp=getProj(d.project),mi=+el.dataset.s,mj=a==="mvup"?mi-1:mi+1;
+      if(mp&&mj>=0&&mj<mp.plan.length){var tmp=mp.plan[mi];mp.plan[mi]=mp.plan[mj];mp.plan[mj]=tmp;queuePlan(mp);save();}
+      break;
+    case"rmplan":
+      var rp=getProj(d.project);
+      if(rp){rp.plan.splice(+el.dataset.s,1);queuePlan(rp);save();}
+      break;
     case"addS":
-      var sn=($("#newSN").value||"").trim(),only=$("#newSO")&&$("#newSO").checked,cp=getProj(d.project);
+      var sn=($("#newSN").value||"").trim(),alsoT=$("#newSO")&&$("#newSO").checked,cp=getProj(d.project);
       if(!sn){toast("Type a step name first");return;}
       if(!cp)break;
-      var known=stepsFor(cp.name).filter(function(x){return x.toLowerCase()===sn.toLowerCase();})[0];
-      if(known){d.step=known;}
-      else if(only){cp.steps.push(sn);enqueue({op:"add_step",type:cp.type,step:sn,project:cp.name});d.step=sn;}
-      else{var ct=getType(cp.type);ct.steps.push(sn);enqueue({op:"add_step",type:ct.name,step:sn,project:""});d.step=sn;}
+      var known=cp.plan.filter(function(x){return lc(x)===lc(sn);})[0];
+      if(known){d.step=known;toast("That step is already in the plan");}
+      else{
+        cp.plan.push(sn);queuePlan(cp);d.step=sn;
+        if(alsoT){var ct=getType(cp.type);if(ct&&!inListCI(ct.steps,sn)){ct.steps.push(sn);queueTpl(ct.name,ct.steps);}}
+      }
       addingS=false;save();break;
     case"addTstep":
       var ti=+el.dataset.t,tt=S.types[ti],ni=$("#ns"+ti),nv=ni?ni.value.trim():"";
-      if(tt&&nv){if(inListCI(tt.steps,nv)){toast("That step already exists");return;}tt.steps.push(nv);enqueue({op:"add_step",type:tt.name,step:nv,project:""});save();}break;
-    case"rmstep":S.types[+el.dataset.t].steps.splice(+v,1);save();break;
+      if(tt&&nv){if(inListCI(tt.steps,nv)){toast("That step already exists");return;}tt.steps.push(nv);queueTpl(tt.name,tt.steps);save();}
+      break;
+    case"rmstep":
+      var rt0=S.types[+el.dataset.t];
+      if(rt0){rt0.steps.splice(+v,1);queueTpl(rt0.name,rt0.steps);save();}
+      break;
     case"rmtype":
       var rt=S.types[+el.dataset.t];
-      if(S.projects.some(function(p){return p.type===rt.name;})){toast("Some projects use this type — mark them done or keep the type");return;}
-      if(armed==="t"+el.dataset.t){S.types.splice(+el.dataset.t,1);armed=null;save();}else armed="t"+el.dataset.t;break;
+      if(S.projects.some(function(p){return p.type===rt.name;})){toast("Some projects use this type — keep it, or mark them done");return;}
+      if(armed==="t"+el.dataset.t){queueTpl(rt.name,[]);S.types.splice(+el.dataset.t,1);armed=null;save();}else armed="t"+el.dataset.t;
+      break;
     case"addtype":
-      var tn=($("#newTN").value||"").trim(),steps=($("#newTS").value||"").split(",").map(function(x){return x.trim();}).filter(Boolean);
+      var tn=($("#newTN").value||"").trim(),steps=dedupe(($("#newTS").value||"").split(","));
       if(!tn||!steps.length){toast("Give the type a name and at least one step");return;}
       if(findCI(S.types,tn)){toast("That type already exists");return;}
-      S.types.push({name:tn,steps:steps});enqueue({op:"add_type",name:tn,steps:steps});save();toast("Type added");break;
+      S.types.push({name:tn,steps:steps});queueTpl(tn,steps);save();toast("Type added");break;
     case"sync":
       var u=$("#url");if(u){S.url=u.value.trim();save();}
       if(!S.url){syncMsg="Paste your web app URL first";syncState="bad";break;}
@@ -576,29 +765,42 @@ document.addEventListener("click",function(e){
       try{var added=restoreData(JSON.parse($("#restore").value));save();toast("Added "+added+" session"+(added===1?"":"s"));flush();}
       catch(err){toast("That doesn't look like a backup");return;}
       break;
-    case"wipe":if(armed==="wipe"){S.sessions=[];armed=null;save();toast("Erased");}else armed="wipe";break;
+    case"wipe":
+      if(armed==="wipe"){S.sessions.forEach(function(s){S.tomb.push(s.id);});S.sessions=[];armed=null;save();toast("Cleared from this device");}
+      else armed="wipe";
+      break;
   }
   render();
 });
 document.addEventListener("input",function(e){
-  var tid=e.target.dataset&&e.target.dataset.tid;
-  if(tid){var tt=T(+tid);if(tt){tt[e.target.dataset.f]=e.target.value;save();}return;}
-  if(e.target.id==="desc"){S.draft.desc=e.target.value;save();}
+  var tg=e.target,tid=tg.dataset&&tg.dataset.tid;
+  if(tid){var tt=T(+tid);if(tt){tt[tg.dataset.f]=tg.value;save();}return;}
+  if(tg.dataset&&tg.dataset.pinfo){var pp=getProj(S.draft.project);if(pp){pp[tg.dataset.pinfo]=tg.value;save();}return;}
+  if(tg.id==="newPN"){newPName=tg.value;return;}
+  if(tg.id==="desc"){S.draft.desc=tg.value;save();}
 });
 document.addEventListener("change",function(e){
-  var id=e.target.id;
-  if(e.target.dataset&&e.target.dataset.ps!==undefined){
-    var p=S.projects[+e.target.dataset.ps];
-    if(p){p.status=e.target.value;enqueue({op:"set_status",name:p.name,status:p.status});save();}
+  var tg=e.target,id=tg.id;
+  if(tg.dataset&&tg.dataset.pinfo){var pi=getProj(S.draft.project);if(pi)queueInfo(pi);return;}
+  if(tg.dataset&&tg.dataset.pstat!==undefined){
+    var ps0=getProj(S.draft.project);
+    if(ps0){ps0.status=tg.value;enqueue({op:"set_status",name:ps0.name,status:ps0.status});save();render();}
     return;
   }
-  if(id==="selP"){S.draft.project=e.target.value;S.draft.step="";save();render();}
-  else if(id==="selS"){S.draft.step=e.target.value;save();}
-  else if(id==="statProj"){statProj=e.target.value;render();}
-  else if(id==="goal"){S.goalH=Math.max(0,Math.min(24,parseFloat(e.target.value)||0));save();}
-  else if(id==="theme"){S.theme=e.target.value;applyTheme();save();}
-  else if(id==="awake"){S.awake=e.target.value==="1";save();if(!S.awake)keepAwake(false);}
-  else if(id==="url"){S.url=e.target.value.trim();save();}
+  if(tg.dataset&&tg.dataset.ps!==undefined){
+    var p=S.projects[+tg.dataset.ps];
+    if(p){p.status=tg.value;enqueue({op:"set_status",name:p.name,status:p.status});save();}
+    return;
+  }
+  if(id==="newPT"){newPType=tg.value;render();}
+  else if(id==="selP"){S.draft.project=tg.value;S.draft.step="";editPlan=false;showDetails=false;save();render();}
+  else if(id==="selS"){S.draft.step=tg.value;save();}
+  else if(id==="statProj"){statProj=tg.value;render();}
+  else if(id==="cmpType"){cmpType=tg.value;render();}
+  else if(id==="goal"){S.goalH=Math.max(0,Math.min(24,parseFloat(tg.value)||0));save();}
+  else if(id==="theme"){S.theme=tg.value;applyTheme();save();}
+  else if(id==="awake"){S.awake=tg.value==="1";save();if(!S.awake)keepAwake(false);}
+  else if(id==="url"){S.url=tg.value.trim();save();}
 });
 
 /* ---------- lifecycle ---------- */
