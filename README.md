@@ -25,7 +25,7 @@ You can edit Projects and Steps right in the sheet (add a step, set a project to
 1. github.com > New repository, e.g. `TimerPlannerProject`, Public.
 2. Add file > Upload files: `index.html`, `sw.js`, `manifest.webmanifest`, `icon-192.png`, `icon-512.png`, `apple-touch-icon.png`. (Not `apps-script/` and not this README.)
 3. Settings > Pages > Source: Deploy from a branch > `main` / root > Save.
-4. After about a minute: `https://<your-username>.github.io/[TimerPlannerProject](https://<your-username>.github.io/TimerPlannerProjec/)/`
+4. After about a minute: `https://<your-username>.github.io/TimerPlannerProject/`
 
 Your Apps Script URL is not in the repo. You paste it into the app on your phone.
 
